@@ -19,6 +19,7 @@ import inspect
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+import shutil
 
 import torch
 import torch.distributed as dist
@@ -77,6 +78,14 @@ if TYPE_CHECKING:
     from transformers.generation.streamers import BaseStreamer
 
 logger = logging.get_logger(__name__)
+
+
+def print_generated_tokens(tokenizer, last_std, input_ids):
+    std = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    sys.stderr.write(std.replace(last_std, ""))
+    sys.stderr.flush()
+    
+    return std
 
 
 @dataclass
@@ -1516,6 +1525,7 @@ def generate(
 
         return contrastive_search(
             model,
+            tokenizer,
             input_ids,
             top_k=generation_config.top_k,
             penalty_alpha=generation_config.penalty_alpha,
@@ -1543,8 +1553,9 @@ def generate(
         )
 
         # 13. run sample
-        return model.sample(
+        return sample(
             input_ids,
+            tokenizer,
             logits_processor=logits_processor,
             logits_warper=logits_warper,
             stopping_criteria=stopping_criteria,
@@ -1774,6 +1785,7 @@ def generate(
 @torch.no_grad()
 def contrastive_search(
     model,
+    tokenizer,
     input_ids: torch.LongTensor,
     top_k: Optional[int] = 1,
     penalty_alpha: Optional[float] = 0,
@@ -1912,6 +1924,9 @@ def contrastive_search(
     this_peer_finished = False  # used by synced_gpus only
     batch_size = input_ids.shape[0]
 
+    last_std = ""
+    terminal_size = shutil.get_terminal_size()
+    max_terminal_width = terminal_size.columns
     while True:
         if synced_gpus:
             # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -2098,6 +2113,9 @@ def contrastive_search(
 
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+        
+        std = print_generated_tokens(tokenizer, last_std, input_ids)
+        last_std = std
         if streamer is not None:
             streamer.put(next_tokens.cpu())
         model_kwargs = model._update_model_kwargs_for_generation(
@@ -2123,6 +2141,7 @@ def contrastive_search(
 
     if streamer is not None:
         streamer.end()
+    sys.stderr.write('\n')
 
     if return_dict_in_generate:
         if model.config.is_encoder_decoder:
@@ -2299,6 +2318,9 @@ def greedy_search(
     unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
     this_peer_finished = False  # used by synced_gpus only
+    
+    last_std = ""
+    
     while True:
         if synced_gpus:
             # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -2357,7 +2379,9 @@ def greedy_search(
 
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-        sys.stderr.write('\r' + tokenizer.decode(input_ids[0], skip_special_tokens=True) + (' '))
+        
+        std = print_generated_tokens(tokenizer, last_std, input_ids)
+        last_std = std
         if streamer is not None:
             streamer.put(next_tokens.cpu())
         model_kwargs = model._update_model_kwargs_for_generation(
@@ -2407,6 +2431,7 @@ def greedy_search(
 
 def sample(
     model,
+    tokenizer,
     input_ids: torch.LongTensor,
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -2579,6 +2604,9 @@ def sample(
 
     this_peer_finished = False  # used by synced_gpus only
     # auto-regressive generation
+    last_std = ""
+    terminal_size = shutil.get_terminal_size()
+    max_terminal_width = terminal_size.columns
     while True:
         if synced_gpus:
             # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -2640,6 +2668,9 @@ def sample(
 
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+        
+        std = print_generated_tokens(tokenizer, last_std, input_ids)
+        last_std = std
         if streamer is not None:
             streamer.put(next_tokens.cpu())
         model_kwargs = model._update_model_kwargs_for_generation(
@@ -2665,6 +2696,7 @@ def sample(
 
     if streamer is not None:
         streamer.end()
+    sys.stderr.write('\n')
 
     if return_dict_in_generate:
         if model.config.is_encoder_decoder:
@@ -2956,7 +2988,7 @@ def beam_search(
         model_kwargs = model._update_model_kwargs_for_generation(
             outputs, model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder
         )
-        if model_kwargs["past_key_values"] is not None:
+        if model_kwargs["past_key_values"] is not None: 
             model_kwargs["past_key_values"] = model._reorder_cache(model_kwargs["past_key_values"], beam_idx)
 
         if return_dict_in_generate and output_scores:
